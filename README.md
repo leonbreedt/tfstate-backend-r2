@@ -65,8 +65,8 @@ variable or read it from a secret store like Vault.
 ```hcl
 backend "http" {
   address        = "https://<YOUR_HOST>/state/<NAME>"
-  lock_address   = "https://<YOUR_HOST>/states/hello-world/lock"
-  unlock_address = "https://<YOUR_HOST>/states/hello-world/lock"
+  lock_address   = "https://<YOUR_HOST>/state/<NAME>/lock"
+  unlock_address = "https://<YOUR_HOST>/state/<NAME>/lock"
   username       = "anything"
   password       = "<PSK>"
 }
