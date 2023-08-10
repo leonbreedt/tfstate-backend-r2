@@ -1,0 +1,23 @@
+# see https://developers.cloudflare.com/workers/wrangler/configuration/
+# for a full reference on the options available in this file.
+
+name = "tfstate-backend-r2"
+main = "build/worker/shim.mjs"
+compatibility_date = "2023-03-22"
+workers_dev = false
+
+# deployment configuration
+account_id = <ID>
+# you could also use custom domains instead
+route = { pattern = "<DOMAIN>/*", zone_id = "<ZONE_ID>" }
+# the bucket where state will be stored
+r2_buckets  = [
+  { binding = "<BUCKET_BINDING_NAME>", bucket_name = "<BUCKET_NAME>"}
+]
+
+[vars]
+# name of bucket to read and write from
+BUCKET = "<BUCKET_BINDING_NAME>"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
