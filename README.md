@@ -24,7 +24,8 @@ Generate a secure shared key, using a command like below:
 pwgen --symbols --secure 512 1
 ```
 
-Create the secret (the worker expects the name `PSK`):
+Create the secret (the worker expects the name `PSK`, Wrangler
+will prompt you to enter the secret value):
 
 ```shell
 npx wrangler secret put PSK
