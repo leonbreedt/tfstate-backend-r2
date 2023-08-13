@@ -12,12 +12,15 @@ account_id = <ID>
 route = { pattern = "<DOMAIN>/*", zone_id = "<ZONE_ID>" }
 # the bucket where state will be stored
 r2_buckets  = [
-  { binding = "<BUCKET_BINDING_NAME>", bucket_name = "<BUCKET_NAME>"}
+  { binding = "tfstate-bucket", bucket_name = "<BUCKET_NAME>"}
+]
+durable_objects.bindings = [
+  { name = "tfstate-lock", class_name = "TFStateLock" }
 ]
 
-[vars]
-# name of bucket to read and write from
-BUCKET = "<BUCKET_BINDING_NAME>"
+[[migrations]]
+tag = "v1"
+new_classes = ["TFStateLock"]
 
 [build]
 command = "cargo install -q worker-build && worker-build --release"

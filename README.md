@@ -24,11 +24,11 @@ Generate a secure shared key, using a command like below:
 pwgen --symbols --secure 512 1
 ```
 
-Create the secret (the worker expects the name `PSK`, Wrangler
+Create the secret (the worker expects the name `psk`, Wrangler
 will prompt you to enter the secret value):
 
 ```shell
-npx wrangler secret put PSK
+npx wrangler secret put psk
 ```
 
 ### Configure wrangler.toml
