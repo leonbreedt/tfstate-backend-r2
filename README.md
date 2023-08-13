@@ -59,8 +59,9 @@ The user name can be anything, it will be ignored.
 
 The password should be the value of the `psk` secret created above.
 
-Of course, don't store it in your Terraform file, but pass it in via a
-variable or read it from a secret store like Vault.
+Of course, don't store it in your Terraform file, but pass it in via
+e.g. `-backend-config=password=<PSK>` when doing `init`,
+having read the `PSK` value from a secure secret store.
 
 ```hcl
 backend "http" {
