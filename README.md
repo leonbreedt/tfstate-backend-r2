@@ -46,8 +46,8 @@ Run `npx wrangler deploy` to deploy it to Cloudflare.
 ### Test the worker
 
 You can verify that it has worked by calling `https://<YOUR_HOST>/health`,
-if it worked, and the secret `PSK` and var `BUCKET` were present,
-you will see the string `UP` as the response.
+if it worked, and the secret `psk` was present, you will see the string
+`UP` as the response.
 
 ## Configuration
 
@@ -57,7 +57,7 @@ a name for the Terraform state file (without the `.tfstate` suffix).
 
 The user name can be anything, it will be ignored.
 
-The password should be the value of the `PSK` secret created above.
+The password should be the value of the `psk` secret created above.
 
 Of course, don't store it in your Terraform file, but pass it in via a
 variable or read it from a secret store like Vault.
@@ -66,8 +66,10 @@ variable or read it from a secret store like Vault.
 backend "http" {
   address        = "https://<YOUR_HOST>/state/<NAME>"
   lock_address   = "https://<YOUR_HOST>/state/<NAME>/lock"
+  lock_method    = "PUT"
   unlock_address = "https://<YOUR_HOST>/state/<NAME>/lock"
-  username       = "anything"
+  unlock_method  = "DELETE"
+  username       = "terraform"
   password       = "<PSK>"
 }
 ```

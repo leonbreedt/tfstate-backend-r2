@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-use std::{cell::RefCell, rc::Rc};
-
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use worker::*;
@@ -51,9 +49,9 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 Response::error("unauthorized", 403)
             }
         })
-        .on_async("/state/:name/lock", |mut req, ctx| async move {
+        .on_async("/state/:name/lock", |req, ctx| async move {
             if is_authorized(&req, &ctx).await {
-                match lock_or_unlock_tfstate(&mut req, &ctx).await {
+                match lock_or_unlock_tfstate(req, ctx).await {
                     Ok(resp) => Ok(resp),
                     Err(e) => match e {
                         Error::Json((msg, status)) => Response::error(msg, status),
@@ -90,8 +88,8 @@ async fn write_tfstate(req: &mut Request, ctx: &RouteContext<()>) -> Result<()> 
         .param("name")
         .ok_or(Error::Json(("missing name".to_string(), 400)))?;
 
-    if let Some(existing_lock) = read_lock(&ctx, &name).await? {
-        if let Some(lock_id) = query_param(&req, QUERY_PARAM_LOCK_ID) {
+    if let Some(existing_lock) = read_lock(ctx, name).await? {
+        if let Some(lock_id) = query_param(req, QUERY_PARAM_LOCK_ID) {
             // Already locked, and lock ID specified, must match.
             if lock_id != existing_lock.id {
                 console_error!(
@@ -128,7 +126,7 @@ async fn write_tfstate(req: &mut Request, ctx: &RouteContext<()>) -> Result<()> 
     Ok(())
 }
 
-async fn lock_or_unlock_tfstate(req: &mut Request, ctx: &RouteContext<()>) -> Result<Response> {
+async fn lock_or_unlock_tfstate(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let name = ctx
         .param("name")
         .ok_or(Error::Json(("missing name".to_string(), 400)))?;
@@ -137,7 +135,7 @@ async fn lock_or_unlock_tfstate(req: &mut Request, ctx: &RouteContext<()>) -> Re
     let id = namespace.id_from_name(name)?;
     let stub = id.get_stub()?;
 
-    stub.fetch_with_request(req.clone()?.into()).await
+    stub.fetch_with_request(req).await
 }
 
 async fn read_lock(ctx: &RouteContext<()>, name: &str) -> Result<Option<LockInfo>> {
@@ -161,8 +159,7 @@ async fn is_authorized(req: &Request, ctx: &RouteContext<()>) -> bool {
                 if method == "Basic" {
                     match base64::engine::general_purpose::URL_SAFE.decode(value) {
                         Ok(decoded) => {
-                            let as_utf8 =
-                                String::from_utf8(decoded).unwrap_or_else(|_| String::new());
+                            let as_utf8 = String::from_utf8(decoded).unwrap_or_default();
                             if let Some((_, password)) = as_utf8.split_once(':') {
                                 return secret.to_string() == password;
                             } else {
@@ -216,18 +213,18 @@ pub struct TFStateLock {
 pub struct LockInfo {
     #[serde(rename = "ID")]
     id: String,
-    #[serde(rename = "Operation")]
-    operation: String,
-    #[serde(rename = "Info")]
-    info: String,
-    #[serde(rename = "Who")]
-    who: String,
-    #[serde(rename = "Version")]
-    version: String,
-    #[serde(rename = "Created")]
-    created: String,
-    #[serde(rename = "Path")]
-    path: String,
+    #[serde(rename = "Operation", skip_serializing_if = "Option::is_none")]
+    operation: Option<String>,
+    #[serde(rename = "Info", skip_serializing_if = "Option::is_none")]
+    info: Option<String>,
+    #[serde(rename = "Who", skip_serializing_if = "Option::is_none")]
+    who: Option<String>,
+    #[serde(rename = "Version", skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(rename = "Created", skip_serializing_if = "Option::is_none")]
+    created: Option<String>,
+    #[serde(rename = "Path", skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
 }
 
 #[durable_object]
@@ -241,63 +238,69 @@ impl DurableObject for TFStateLock {
         }
     }
 
-    async fn fetch(&mut self, req: Request) -> Result<Response> {
+    async fn fetch(&mut self, mut req: Request) -> Result<Response> {
         self.load_if_needed().await?;
 
-        let env = self.env.clone().into();
-        let router = Router::with_data(Rc::new(RefCell::new(self)));
+        // Couldn't make Router work well with borrow-checker, do it
+        // the cave-man way.
 
-        router
-            .get_async("/state/:name/lock", |_req, ctx| async move {
-                let mut _self = ctx.data.borrow_mut();
-                if let Some(lock_info) = &_self.lock_info {
-                    Response::from_json(lock_info)
-                } else {
-                    Response::error("no lock found", 404)
-                }
-            })
-            .put_async("/state/:name/lock", |mut req, ctx| async move {
-                let mut _self = ctx.data.borrow_mut();
-                if let Some(existing_lock) = &_self.lock_info {
-                    Response::from_json(&serde_json::json!(existing_lock))
-                        .map(|r| r.with_status(423))
-                } else {
-                    if let Some(lock_request) = req.json::<LockInfo>().await.ok() {
-                        _self
-                            .state
-                            .storage()
-                            .put(LOCK_INFO_STORAGE_KEY, &lock_request)
-                            .await?;
-                        Response::ok("locked")
-                    } else {
-                        Response::error("no lock ID", 400)
+        let path = req.path();
+        let segments: Vec<_> = path.splitn(4, '/').collect();
+        if segments.len() != 4 {
+            return Response::error("not found", 404);
+        }
+
+        match (segments[1], segments[2], segments[3]) {
+            ("state", name, "lock") => match req.method() {
+                Method::Put => {
+                    match req.json::<LockInfo>().await {
+                        Ok(lock_request) => {
+                            if let Some(existing_lock) = &self.lock_info {
+                                if existing_lock.id != lock_request.id {
+                                    Response::error("already locked by another ID", 423)
+                                } else {
+                                    // Already locked by same ID, do nothing.
+                                    Response::ok("locked")
+                                }
+                            } else {
+                                console_debug!("locking '{}' with id '{}'", name, lock_request.id);
+                                self.state
+                                    .storage()
+                                    .put(LOCK_INFO_STORAGE_KEY, &lock_request)
+                                    .await?;
+                                self.lock_info = Some(lock_request);
+                                Response::ok("locked")
+                            }
+                        }
+                        Err(e) => {
+                            console_error!("failed to deserialize request: {}", e);
+                            Response::error("no lock ID in request", 400)
+                        }
                     }
                 }
-            })
-            .delete_async("/state/:name/lock", |mut req, ctx| async move {
-                let mut _self = ctx.data.borrow_mut();
-                if let Some(existing_lock) = &_self.lock_info {
-                    if let Some(unlock_request) = req.json::<LockInfo>().await.ok() {
-                        if unlock_request.id != existing_lock.id {
-                            Response::from_json(&serde_json::json!(existing_lock))
-                                .map(|r| r.with_status(423))
+                Method::Delete => {
+                    if let Some(existing_lock) = &self.lock_info {
+                        if let Some(lock_id) = query_param(&req, QUERY_PARAM_LOCK_ID) {
+                            if lock_id != existing_lock.id {
+                                Response::error("already locked by another ID", 423)
+                            } else {
+                                console_debug!("unlocking '{}' for id '{}'", name, lock_id);
+                                self.state.storage().delete(LOCK_INFO_STORAGE_KEY).await?;
+                                self.lock_info = None;
+                                Response::ok("unlocked")
+                            }
                         } else {
-                            _self.state.storage().delete(LOCK_INFO_STORAGE_KEY).await?;
-                            Response::ok("unlocked")
+                            Response::error("invalid unlock request", 400)
                         }
                     } else {
-                        Response::error("invalid unlock request", 400)
+                        // Not an error to unlock if there is no lock.
+                        Response::ok("unlocked")
                     }
-                } else {
-                    // Not an error to unlock if there is no lock.
-                    Response::ok("unlocked")
                 }
-            })
-            .or_else_any_method_async("*", |_req, _ctx| async move {
-                Response::error("not found", 404)
-            })
-            .run(req, env)
-            .await
+                _ => Response::error("method not allowed", 405),
+            },
+            _ => Response::error("not found", 404),
+        }
     }
 }
 
@@ -306,15 +309,6 @@ impl TFStateLock {
         if let ObjectLoadState::NotLoaded = self.load_state {
             self.lock_info = self.state.storage().get(LOCK_INFO_STORAGE_KEY).await.ok();
             self.load_state = ObjectLoadState::Loaded;
-
-            console_debug!(
-                "loaded lock info from storage: '{}'",
-                if let Some(info) = self.lock_info.as_ref() {
-                    serde_json::to_string(info).ok().unwrap_or_else(String::new)
-                } else {
-                    String::new()
-                }
-            )
         }
         Ok(())
     }
