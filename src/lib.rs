@@ -7,7 +7,7 @@ use worker::*;
 const PSK_SECRET_BINDING: &str = "psk";
 const TFSTATE_BUCKET_BINDING: &str = "tfstate-bucket";
 const TFSTATE_LOCK_BINDING: &str = "tfstate-lock";
-const QUERY_PARAM_LOCK_ID: &str = "lock_id";
+const QUERY_PARAM_LOCK_ID: &str = "ID";
 const LOCK_INFO_STORAGE_KEY: &str = "_lockInfo";
 
 #[event(fetch, respond_with_errors)]
@@ -36,10 +36,12 @@ async fn main(req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 Response::error("unauthorized", 403)
             }
         })
-        .put_async("/state/:name", |mut req, ctx| async move {
+        .put_async("/state/:name", create_or_update_tfstate)
+        .post_async("/state/:name", create_or_update_tfstate)
+        .delete_async("/state/:name", |req, ctx| async move {
             if is_authorized(&req, &ctx).await {
-                match write_tfstate(&mut req, &ctx).await {
-                    Ok(_) => Response::ok("updated"),
+                match delete_tfstate(&ctx).await {
+                    Ok(_) => Response::ok("deleted"),
                     Err(e) => match e {
                         Error::Json((msg, status)) => Response::error(msg, status),
                         _ => Response::error(format!("{}", e), 500),
@@ -83,7 +85,7 @@ async fn read_tfstate(ctx: &RouteContext<()>) -> Result<Vec<u8>> {
     body.bytes().await
 }
 
-async fn write_tfstate(req: &mut Request, ctx: &RouteContext<()>) -> Result<()> {
+async fn write_tfstate(req: &mut Request, ctx: &RouteContext<()>) -> Result<Response> {
     let name = ctx
         .param("name")
         .ok_or(Error::Json(("missing name".to_string(), 400)))?;
@@ -96,7 +98,7 @@ async fn write_tfstate(req: &mut Request, ctx: &RouteContext<()>) -> Result<()> 
                     "already locked by another ID '{}', rejecting",
                     existing_lock.id
                 );
-                return Err(Error::Json(("already locked".to_string(), 423)));
+                return Ok(Response::from_json(&existing_lock)?.with_status(423));
             } else {
                 console_debug!("already locked by our ID '{}', permitting", lock_id);
             }
@@ -105,7 +107,7 @@ async fn write_tfstate(req: &mut Request, ctx: &RouteContext<()>) -> Result<()> 
                 "already locked by another ID '{}', rejecting",
                 existing_lock.id
             );
-            return Err(Error::Json(("already locked".to_string(), 423)));
+            return Ok(Response::from_json(&existing_lock)?.with_status(423));
         }
     } else {
         console_log!("not locked, permitting tfstate update");
@@ -123,7 +125,46 @@ async fn write_tfstate(req: &mut Request, ctx: &RouteContext<()>) -> Result<()> 
 
     console_log!("updated of '{}' completed", object_name);
 
-    Ok(())
+    Response::ok("")
+}
+
+async fn delete_tfstate(ctx: &RouteContext<()>) -> Result<Response> {
+    let name = ctx
+        .param("name")
+        .ok_or(Error::Json(("missing name".to_string(), 400)))?;
+
+    if let Some(existing_lock) = read_lock(ctx, name).await? {
+        console_error!(
+            "'{}' already locked by '{}', rejecting delete",
+            name,
+            existing_lock.id
+        );
+        Ok(Response::error("already locked", 423)?)
+    } else {
+        let object_name = format!("{}.tfstate", name);
+
+        console_log!("deleting '{}'...", object_name);
+
+        ctx.bucket(TFSTATE_BUCKET_BINDING)?
+            .delete(&object_name)
+            .await?;
+
+        Ok(Response::ok("deleted")?)
+    }
+}
+
+async fn create_or_update_tfstate(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    if is_authorized(&req, &ctx).await {
+        match write_tfstate(&mut req, &ctx).await {
+            Ok(_) => Response::ok("updated"),
+            Err(e) => match e {
+                Error::Json((msg, status)) => Response::error(msg, status),
+                _ => Response::error(format!("{}", e), 500),
+            },
+        }
+    } else {
+        Response::error("unauthorized", 403)
+    }
 }
 
 async fn lock_or_unlock_tfstate(req: Request, ctx: RouteContext<()>) -> Result<Response> {
@@ -252,12 +293,19 @@ impl DurableObject for TFStateLock {
 
         match (segments[1], segments[2], segments[3]) {
             ("state", name, "lock") => match req.method() {
+                Method::Get => {
+                    if let Some(lock_info) = self.lock_info.as_ref() {
+                        Response::from_json(lock_info)
+                    } else {
+                        Response::from_json(&serde_json::json!("{}"))
+                    }
+                }
                 Method::Put => {
                     match req.json::<LockInfo>().await {
                         Ok(lock_request) => {
                             if let Some(existing_lock) = &self.lock_info {
                                 if existing_lock.id != lock_request.id {
-                                    Response::error("already locked by another ID", 423)
+                                    Ok(Response::from_json(&existing_lock)?.with_status(423))
                                 } else {
                                     // Already locked by same ID, do nothing.
                                     Response::ok("locked")
@@ -268,7 +316,9 @@ impl DurableObject for TFStateLock {
                                     .storage()
                                     .put(LOCK_INFO_STORAGE_KEY, &lock_request)
                                     .await?;
+                                let id = lock_request.id.clone();
                                 self.lock_info = Some(lock_request);
+                                console_debug!("locked '{}' for id '{}'", name, id);
                                 Response::ok("locked")
                             }
                         }
@@ -280,13 +330,14 @@ impl DurableObject for TFStateLock {
                 }
                 Method::Delete => {
                     if let Some(existing_lock) = &self.lock_info {
-                        if let Some(lock_id) = query_param(&req, QUERY_PARAM_LOCK_ID) {
-                            if lock_id != existing_lock.id {
-                                Response::error("already locked by another ID", 423)
+                        if let Some(lock_request) = req.json::<LockInfo>().await.ok() {
+                            if lock_request.id != existing_lock.id {
+                                Ok(Response::from_json(&existing_lock)?.with_status(423))
                             } else {
-                                console_debug!("unlocking '{}' for id '{}'", name, lock_id);
+                                console_debug!("unlocking '{}' for id '{}'", name, lock_request.id);
                                 self.state.storage().delete(LOCK_INFO_STORAGE_KEY).await?;
                                 self.lock_info = None;
+                                console_debug!("unlocked '{}' for id '{}'", name, lock_request.id);
                                 Response::ok("unlocked")
                             }
                         } else {
