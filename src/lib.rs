@@ -330,7 +330,7 @@ impl DurableObject for TFStateLock {
                 }
                 Method::Delete => {
                     if let Some(existing_lock) = &self.lock_info {
-                        if let Some(lock_request) = req.json::<LockInfo>().await.ok() {
+                        if let Ok(lock_request) = req.json::<LockInfo>().await {
                             if lock_request.id != existing_lock.id {
                                 Ok(Response::from_json(&existing_lock)?.with_status(423))
                             } else {
